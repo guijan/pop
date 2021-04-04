@@ -1,0 +1,198 @@
+#include <stdlib.h>
+
+typedef struct List List;
+struct List {
+	void *datap;
+	List *nextp;
+};
+
+/* Compar: the generic compare function used with the stdlib qsort() */
+typedef int (Compar)(const void *, const void *);
+
+/* Datafunc: The first argument is List's data, the second is freeform
+ * Used with listapply() to run a function on the entire list.
+ *
+ * listapply() keeps iterating over the list as long as it returns > 0.
+ * listapply() stops and passes through a <= 0 return value.
+ */
+typedef int (Datafunc)(void *, void *);
+
+/* Datafree: free List data */
+typedef void (Datafree)(void *);
+
+List *listnew(void *);
+List *listaddfront(List *, List *);
+List *listaddend(List *, List *);
+void *listgetdata(List *, void *, Compar *);
+int listapply(List *, Datafunc, void *);
+List *listreverse(List *);
+size_t listlen(List *);
+void memswap(void *, void *, size_t);
+List *listaddnum(List *, List *, size_t);
+
+/* listnew: return new generic List holding datap
+ *
+ * Returns NULL on error.
+ */
+List *
+listnew(void *datap)
+{
+	List *listp;
+
+	if ((listp = reallocarray(NULL, 1, sizeof(*listp))) == NULL)
+			return (NULL);
+	listp->datap = datap;
+	listp->nextp = NULL;
+
+	return (listp);
+}
+
+/* listaddfront: add src to the front of dst
+ *
+ * Returns the new front of the list in dst.
+ * Adding a NULL member to dst returns the current start of the list.
+ */
+List *
+listaddfront(List *dst, List *src)
+{
+
+	if (src == NULL)
+		return (dst);
+	for (; src->nextp != NULL; src = src->nextp)
+		;
+
+	src->nextp = dst;
+	return (src);
+}
+
+/* listaddend: add new member to the end of dst
+ *
+ * Returns the new end of dst.
+ * Adding a NULL member to dst returns the current end of the list.
+ */
+List *
+listaddend(List *dst, List *src)
+{
+	if (dst == NULL)
+		return (src);
+	for (; dst->nextp != NULL; dst = dst->nextp)
+		;
+
+	return ((dst->nextp = src));
+}
+
+/* listgetdata: returns data from listp or NULL if not found */
+void *
+listgetdata(List *listp, void *data, Compar *cmp)
+{
+	for (; listp != NULL; listp = listp->nextp)
+		if (cmp(listp->datap, data) == 0)
+			return (listp->datap);
+
+	return (NULL);
+}
+
+/* listapply: run fn with arg fnarg on listp's data
+ *
+ * Will iterate over the entire list as long as fn returns >0.
+ * Will stop and pass the return value of fn if it returns <=0.
+ */
+int
+listapply(List *listp, Datafunc *fn, void *fnarg)
+{
+	int ret = 0;
+
+	for (; listp != NULL; listp = listp->nextp) {
+		if ((ret = fn(listp->datap, fnarg)) <= 0)
+			break;
+	}
+
+	return (ret <= 0 ? ret : 0);
+}
+
+/* listreverse: reverse listp */
+List *
+listreverse(List *listp)
+{
+	List *prevp;
+	List *nextp;
+
+	for (prevp = NULL; listp != NULL; listp = nextp) {
+		nextp = listp->nextp;
+		listp->nextp = prevp;
+		prevp = listp;
+	}
+
+	return (prevp);
+}
+
+/* listlen: return number of members in listp */
+size_t
+listlen(List *listp)
+{
+	size_t i;
+
+	for (i = 0; listp != NULL; i++)
+		listp = listp->nextp;
+
+	return (i);
+}
+
+/* memswap: generic swap */
+void
+memswap(void *a, void *b, size_t size)
+{
+	size_t i;
+	unsigned char *avec = a;
+	unsigned char *bvec = b;
+	unsigned char byte;
+
+	for (i = 0; i < size; i++) {
+		byte = avec[i];
+		avec[i] = bvec[i];
+		bvec[i] = byte;
+	}
+}
+
+/* listaddnum: add src to dst at 0-indexed memb */
+List *
+listaddnum(List *dst, List *src, size_t memb)
+{
+	List *prevp;
+
+	for (i = 0; i < memb; i++) {
+		prevp = dst;
+	}
+}
+
+/* listfree: free listp, free its data if freedata != NULL */
+void
+listfree(List *listp, Datafree *freedata)
+{
+	List *nextp;
+	for (; listp != NULL; listp = nextp) {
+		nextp = listp->nextp;
+		if (freedata != NULL)
+			freedata(listp->datap);
+		free(listp);
+	}
+}
+
+/* listdup: duplicate list */
+List *
+listdup(List *listp)
+{
+	List *retp;
+	List *ip;
+
+	retp = malloc(sizeof(*retp));
+
+	for (ip = retp; )
+}
+
+/* listdupmemb: */
+List *
+listdupmemb(List *listp, )
+{
+
+}

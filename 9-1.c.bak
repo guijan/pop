@@ -1,0 +1,369 @@
+#include <inttypes.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* SERIALIZE_DECL: declare serializer function named serialize_ ## NAME */
+#define SERIALIZE_DECL(NAME)						\
+	static unsigned char * serialize_##NAME(unsigned char *, 	\
+	    const struct parsedfmt *, va_list *)
+
+/* SERIALIZE_DEF: replicate serialization function for standard integer type.
+ *
+ * TYPE is the type specifier, it must not be "signed" or "unsigned".
+ * PROMOTION is what the type promotes to when it is the second argument of
+ * va_arg(), only different from TYPE for char and short.
+ * NAME generates the name of the function by means of serialize_ ## NAME
+ */
+#define SERIALIZE_DEF(TYPE, PROMOTION, NAME)				\
+	SERIALIZE_TYPEDEF_DEF(TYPE, unsigned TYPE, PROMOTION,		\
+	    unsigned PROMOTION, NAME)
+
+/* SERIALIZE_TYPEDEF_DEF: replicate serialization function, hard case.
+ * For typedefs that can't have the "signed" and "unsigned" type specifiers
+ * tacked on.
+ */
+#define SERIALIZE_TYPEDEF_DEF(SIGNED, UNSIGNED, SIGNED_PROMOTION,	\
+	    UNSIGNED_PROMOTION, NAME)					\
+	static unsigned char *						\
+	serialize_##NAME(unsigned char *buf, const struct parsedfmt	\
+	    *sp, va_list *ap)						\
+	{								\
+		int i;							\
+		UNSIGNED u;						\
+		if (sp->flags & FLAG_SIGN)				\
+			u = va_arg(*ap, SIGNED_PROMOTION);		\
+		else							\
+			u = va_arg(*ap, UNSIGNED_PROMOTION);		\
+		for (i = sizeof(UNSIGNED); i > 0;)			\
+			*buf++ = u >> (CHAR_BIT * --i);			\
+		return (buf);						\
+	}
+
+#define SKIPVARARG_DECL(NAME)						\
+	static void							\
+	skipvararg_##NAME(va_list *ap)
+
+#define SKIPVARARG_DEF(PROMOTION, NAME)					\
+	static void								\
+	skipvararg_##NAME(va_list *ap)					\
+	{								\
+		va_arg(*ap, PROMOTION);					\
+	}
+
+enum flags { /* flags */
+	FLAG_SIGN	= 1 << 0, /* Set if signed. */
+	/* Set if we must grab a repeat count from the variable arguments. */
+	FLAG_REPEAT	= 1 << 1,
+
+	FLAG_NULTERM	= 1 << 2, /* Set if null terminated. */
+};
+
+struct parsedfmt {
+	/* Buffer length required to store this format without repeat. */
+	size_t		len;
+	enum flags	flags;
+	/* Index into serializers[] with the function to serialize this fmt. */
+	int		index;
+};
+
+static size_t spec_process(unsigned char *, const char *, va_list *);
+static char *spec_parse(struct parsedfmt *, const char *);
+static const char *spec_next(const char *);
+static unsigned char *spec_dispatch(unsigned char *, const struct parsedfmt *,
+    va_list *);
+SERIALIZE_DECL(char);
+SERIALIZE_DECL(short);
+SERIALIZE_DECL(int);
+SERIALIZE_DECL(long);
+SERIALIZE_DECL(llong);
+SERIALIZE_DECL(size);
+SERIALIZE_DECL(intmax);
+static size_t spec_getbuflen(const char *, va_list *);
+static size_t spec_skipargs(const struct parsedfmt *, va_list *);
+SKIPVARARG_DECL(char);
+SKIPVARARG_DECL(short);
+SKIPVARARG_DECL(int);
+SKIPVARARG_DECL(long);
+SKIPVARARG_DECL(llong);
+SKIPVARARG_DECL(size);
+SKIPVARARG_DECL(intmax);
+
+
+/* plain char, signed/unsigned char, short, int, long, long long, size_t,
+ * intmax_t/uintmax_t
+ */
+static const char *types = "CcsilLzm";
+static const size_t sizes[] = {
+	sizeof(char),
+	sizeof(char),
+	sizeof(short),
+	sizeof(int),
+	sizeof(long),
+	sizeof(long long),
+	sizeof(size_t),
+	sizeof(intmax_t),
+};
+
+typedef unsigned char *(serializer)(unsigned char *, const struct parsedfmt *,
+    va_list *);
+
+/* All the functions to serialize our types with. */
+static serializer *serializers[] = {
+	NULL,
+	serialize_char,
+	serialize_short,
+	serialize_int,
+	serialize_long,
+	serialize_llong,
+	serialize_size,
+	serialize_intmax,
+};
+
+typedef void (skipvararg)(va_list *);
+
+static skipvararg *skipvarargs[] = {
+	skipvararg_char,
+	skipvararg_short,
+	skipvararg_int,
+	skipvararg_long,
+	skipvararg_llong,
+	skipvararg_size,
+	skipvararg_intmax,
+};
+
+enum {
+	SPECCHAR = '%', /* Character that delimits a specification. */
+};
+
+/* pack: pack integer types into a big-endian representation
+ * The sizes of the types are the smallest size allowed by the standard.
+ *
+ * If buf is NULL, return the size of the buffer required.
+ * If buf isn't NULL, serialize variable arguments according to format in fmt
+ * into buf.
+ *
+ * Typical format: "%-*C0"
+ * The format string follows a % character, and is terminated by a null or a new
+ * format string.
+ * A '-' means the type is signed, a lack of it means the type is unsigned.
+ * A '*' means take the repeat length from a size_t argument preceding the
+ * integer to serialize, otherwise no repetition (taking several arguments with
+ * the same specifier) is made.
+ * 'C' is a type specifier for a plain char type, one of many possible. A '0'
+ * means null termination and only applies to it.
+ * All but the type specifier may be ommited, all else is undefined.
+ *
+ * Returns 0 on error.
+ */
+size_t
+pack(void *buf, const char *fmt, ...)
+{
+	va_list ap;
+	size_t rval;
+
+	va_start(ap, fmt);
+	if (buf == NULL)
+		rval = spec_getbuflen(fmt, &ap);
+	else
+		rval = spec_process(buf, fmt, &ap);
+	va_end(ap);
+	return (rval);
+}
+
+/* spec_process: process entire format string and place result in buf.
+ * *ap must be va_start()'ed, it will not be va_end()'ed by us.
+ *
+ * Returns the count of bytes written to buf on success.
+ * Returns 0 on parse error.
+ */
+static size_t
+spec_process(unsigned char *buf, const char *fmt, va_list *ap)
+{
+	struct parsedfmt s;
+	unsigned char *bp = buf;
+	size_t rval = 0;
+
+	while ((fmt = spec_next(fmt)) != NULL) {
+		if ((fmt = spec_parse(&s, fmt)) == NULL)
+			goto end;
+		bp = spec_dispatch(bp, &s, ap);
+	}
+	rval = bp - buf;
+end:
+	return (rval);
+}
+
+/* spec_next: return pointer to first character of next specifier.
+ * Returns NULL on EOF.
+ */
+static const char *
+spec_next(const char *fmt)
+{
+	while (*fmt != SPECCHAR) {
+		if (*fmt == '\0')
+			return (NULL);
+		fmt++;
+	}
+	return (++fmt);
+}
+
+/* spec_parse: parse a single specification
+ * *ap must be initialized by va_start(), we won't va_end() it.
+ *
+ * Returns a pointer to the character after the last character we've parsed on
+ * success.
+ * Returns -1 on parse error.
+ */
+char *
+spec_parse(struct parsedfmt *sp, const char *fmt)
+{
+	char *typechar;
+
+	sp->flags = 0;
+	typechar = NULL;
+	for (; *fmt != '\0' && *fmt != SPECCHAR; fmt++) {
+		switch (*fmt) {
+		case '-':
+			/* Already have a sign flag. */
+			if (sp->flags & FLAG_SIGN)
+				goto err;
+			sp->flags |= FLAG_SIGN;
+			break;
+		case '0':
+			/* Already have a null terminator flag. */
+			if (sp->flags & FLAG_NULTERM)
+				goto err;
+			sp->flags |= FLAG_NULTERM;
+			break;
+		case '*':
+			/* Already have a repeat flag. */
+			if (sp->flags & FLAG_REPEAT)
+				goto err;
+			sp->flags |= FLAG_REPEAT;
+			break;
+		default:
+			/* Already have a type specifier. */
+			if (typechar != NULL)
+				goto err;
+			/* Type specifier not in list. */
+			if ((typechar = strchr(types, *fmt)) == NULL)
+				goto err;
+			break;
+		}
+	}
+
+	/* Missing type specification. */
+	if (typechar == NULL)
+		goto err;
+	/* Make plain char into signed/unsigned char. */
+	if (*typechar == 'C') {
+		if ((char)-1 < 0)
+			sp->flags |= FLAG_SIGN;
+		typechar++;
+	}
+	sp->index = typechar - types;
+	sp->len = sizes[sp->index];
+	return ((char *)fmt);
+err:
+	return (NULL);
+}
+
+/* spec_dispatch: dispatches format specifier into buf
+ * *ap must be va_start()'ed, it will not be va_end()'ed.
+ *
+ * Returns a pointer to one past the last modified character.
+ */
+static unsigned char *
+spec_dispatch(unsigned char *buf, const struct parsedfmt *sp, va_list *ap)
+{
+	size_t i;
+	size_t repeat;
+
+	repeat = sp->flags & FLAG_REPEAT ? va_arg(*ap, size_t) : 1;
+	for (i = 0; i < repeat; i++)
+		buf = serializers[sp->index](buf, sp, ap);
+	return (buf);
+}
+
+SERIALIZE_DEF(char, int, char);
+SERIALIZE_DEF(short, int, short);
+SERIALIZE_DEF(int, int, int);
+SERIALIZE_DEF(long, long, long);
+SERIALIZE_DEF(long long, long long, llong);
+SERIALIZE_TYPEDEF_DEF(ssize_t, size_t, size_t, ssize_t, size);
+SERIALIZE_TYPEDEF_DEF(intmax_t, uintmax_t, intmax_t, uintmax_t, intmax);
+
+static size_t
+spec_getbuflen(const char *fmt, va_list *ap)
+{
+	struct parsedfmt s;
+	size_t len;
+	size_t rval;
+
+	rval = len = 0;
+	while ((fmt = spec_next(fmt)) != NULL) {
+		if ((fmt = spec_parse(&s, fmt)) == NULL)
+			goto end;
+		len += sizes[s.index] * spec_skipargs(&s, ap);
+	}
+	rval = len;
+end:
+	return (rval);
+}
+
+/* spec_skipargs: skip args in va_list that belong to *sp
+ * An alternative to spec_dispatch that does nothing.
+ *
+ * Returns the repeat count.
+ */
+static size_t
+spec_skipargs(const struct parsedfmt *sp, va_list *ap)
+{
+	size_t i;
+	size_t repeat;
+	repeat = sp->flags & FLAG_REPEAT ? va_arg(*ap, size_t) : 1;
+	for (i = 0; i < repeat; i++)
+		skipvarargs[sp->index](ap);
+	return (repeat);
+}
+
+SKIPVARARG_DEF(int, char);
+SKIPVARARG_DEF(int, short);
+SKIPVARARG_DEF(int, int);
+SKIPVARARG_DEF(long, long);
+SKIPVARARG_DEF(long long, llong);
+SKIPVARARG_DEF(size_t, size);
+SKIPVARARG_DEF(intmax_t, intmax);
+
+/* unpack: unpack serialized binary data in _buf into varargs
+ * Returns the number of characters iterated over on error.
+ */
+size_t
+unpack(void *_buf, const char *fmt, ...)
+{
+	va_list ap;
+	struct parsedfmt s;
+	unsigned char *buf = _buf;
+	unsigned char *bp = buf;
+	size_t rval = 0;
+
+	va_start(ap, fmt);
+	while ((fmt = spec_next(fmt)) != NULL) {
+		if ((fmt = spec_parse(&s, fmt)) == NULL)
+			goto end;
+		bp = spec_unpack(bp, &s, &ap);
+	}
+
+	rval = bp - buf;
+end:
+	va_end(ap);
+	return (rval);
+}
+
+static size_t
+spec_unpack(void *buf, &s)
+{
+
+}

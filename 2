@@ -1,0 +1,106 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+
+#define MAXSTR 10240
+/* it is assumed that a word will never be larger than MAXWORDLEN */
+#define MAXWORDLEN 100
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+typedef size_t strhash; /* strhash: an unsigned type with a size <= size_t */
+
+typedef struct StrTable {
+	size_t nmemb; /* number of members in tab */
+	size_t nhash; /* number of hashes that fit in tab's buffer */
+	const char *tab[MAXSTR];
+} StrTable;
+
+typedef struct StrList StrList;
+struct StrList {
+	const char *str;
+	StrList *next;
+};
+
+typedef struct MrkvList MrkvList;
+typedef struct MrkvTable {
+	size_t nmemb; /* number of members in tab */
+	size_t nhash; /* number of hashes that fit in tab's buffer */
+	MrkvList **tab;
+} MrkvTable;
+
+struct MrkvList {
+
+};
+
+static const char *readword(FILE *);
+static int skipspace(FILE *);
+
+int
+main(int argc, char *argv[])
+{
+
+}
+
+/* readword: read word from FILE stream, skipping a whitespace prefix
+ * The returned pointer to the word can be free()d.
+ *
+ * Return NULL if EOF with no data read.
+ * Return NULL on error, with some data lost.
+ */
+static const char *
+readword(FILE *input)
+{
+	char *str;
+	const size_t bufsz = MAXWORDLEN;
+	int c;
+	size_t i;
+	if ((str = malloc(bufsz)) == NULL)
+		goto err;
+	if (skipspace(input) == EOF)
+		goto err;
+	for (i = 0; i < bufsz - 1; i++) {
+		if ((c = fgetc(input)) == EOF) {
+			if (ferror(input))
+				goto err;
+			else if (feof(input))
+				break;
+		}
+		if (isspace(c)) {
+			if (ungetc(c, input) != c)
+				goto err;
+			break;
+		}
+		str[i] = c;
+	}
+	str[i] = '\0';
+	return (str);
+err:
+	free(str);
+	return (NULL);
+}
+
+/* skipspace: skip whitespace in FILE
+ * Return last character read if it can't be ungetc'd
+ * Return 0 on success
+ * Return EOF on error or EOF
+ */
+static int
+skipspace(FILE *input)
+{
+	int c;
+	while ((c = fgetc(input)) != EOF)
+		if (!isspace(c))
+			return (ungetc(c, input) == c ? 0 : c);
+	return (EOF);
+}
+
+/* hashstr: hash string for StrTable */
+static strhash
+hashstr(StrTable *table, const char *str)
+{
+	strhash hash;
+	for (hash = 0; *str != '\0'; str++)
+		hash *= hash * 37 + *str;
+	return (hash % table->nhash);
+}
